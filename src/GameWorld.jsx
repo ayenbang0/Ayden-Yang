@@ -362,6 +362,8 @@ function updateBirdPhysics(player, platforms, input, worldWidth, worldHeight) {
       const ny = d > 0.5 ? ry / d : uy;
       player.x = input.mouseWorldX + nx * BIRD_MIN_DIST - player.width / 2;
       player.y = input.mouseWorldY + ny * BIRD_MIN_DIST - player.height / 2;
+      player.x = Math.max(0, Math.min(worldWidth - player.width, player.x));
+      player.y = Math.max(0, Math.min(worldHeight - player.height, player.y));
     }
   }
   if (Math.hypot(player.vx, player.vy) > 0.6) player.angle = Math.atan2(player.vy, player.vx);
