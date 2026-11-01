@@ -159,7 +159,7 @@ export const PAGE_DATA = {
   contact: {
     id: 'contact',
     label: 'CONTACT',
-    movementType: 'bounce',
+    movementType: 'snake',
     height: 3200,
     spawn: { xPct: 50, y: 2902 },
     platforms: [

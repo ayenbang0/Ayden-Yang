@@ -39,17 +39,14 @@ const GRAPPLE_GRAVITY = 0.4;
 const GRAPPLE_HOOK_SPEED = 46;
 const GRAPPLE_PULL_SPEED = 20;
 const GRAPPLE_RANGE = 2400;
-const GRAPPLE_STANDOFF = 14;
+const GRAPPLE_ROPE_LEN = 170;
+const GRAPPLE_ROPE_MIN = 70;
+const GRAPPLE_PUMP = 0.2;
 
-// Pogo ball
-const BOUNCE_GRAVITY = 0.45;
-const BOUNCE_DRAG_X = 0.99;
-const BOUNCE_DRAG_Y = 0.9985;
-const BOUNCE_RESTITUTION = 0.97;
-const BOUNCE_MIN_SPEED = 13.5;
-const BOUNCE_DASH_IMPULSE = 15;
-const BOUNCE_MAX_SPEED = 26;
-const BOUNCE_AIR_CONTROL = 0.35;
+// Snake: grid-stepped, stops when it crashes
+const SNAKE_CELL = 24;
+const SNAKE_STEP = 5;
+const SNAKE_LEN = 12;
 const MAX_LAYOUT_WIDTH = 1400;
 
 
@@ -460,13 +457,14 @@ function updateGrapplePhysics(player, platforms, input, worldWidth, worldHeight)
       const range = Math.min(dist, GRAPPLE_RANGE);
       const hit = grappleRaycast(player, platforms, cx + nx * range, cy + ny * range, range);
       const reach = hit ? Math.hypot(hit.x - cx, hit.y - cy) : range;
-      const anchorDist = hit ? Math.max(0, reach - GRAPPLE_STANDOFF) : reach;
       input.hook = {
         phase: 'flying',
         ox: cx, oy: cy, dx: nx, dy: ny,
         tip: 0, reach,
-        ax: cx + nx * anchorDist,
-        ay: cy + ny * anchorDist,
+        hit: !!hit,
+        ax: cx + nx * reach,
+        ay: cy + ny * reach,
+        len: 0,
         stuck: 0,
       };
     }
@@ -474,41 +472,60 @@ function updateGrapplePhysics(player, platforms, input, worldWidth, worldHeight)
 
   const hook = input.hook;
 
-  if (hook && hook.phase === 'hanging') {
-    player.vx = 0;
-    player.vy = 0;
-    player.x = hook.ax - player.width / 2;
-    player.y = hook.ay - player.height / 2;
-    player.onGround = false;
-    return;
-  }
-
   if (hook && hook.phase === 'flying') {
     hook.tip = Math.min(hook.reach, hook.tip + GRAPPLE_HOOK_SPEED);
-    if (hook.tip >= hook.reach) hook.phase = 'pulling';
+    if (hook.tip >= hook.reach) {
+      if (hook.hit) hook.phase = 'reeling';
+      else { input.hook = null; } // nothing to catch: the hook falls away
+    }
   }
 
-  if (hook && hook.phase === 'pulling') {
+  if (input.hook && input.hook.phase === 'reeling') {
+    // Reel in until the rope is at its swing length, then swing
     const dx = hook.ax - cx;
     const dy = hook.ay - cy;
     const dist = Math.hypot(dx, dy);
-    if (dist < 6) {
-      hook.phase = 'hanging';
-      player.vx = 0;
-      player.vy = 0;
+    if (dist <= GRAPPLE_ROPE_LEN + 2) {
+      hook.phase = 'swinging';
+      hook.len = Math.max(GRAPPLE_ROPE_MIN, dist);
+    } else {
+      const sp = Math.min(GRAPPLE_PULL_SPEED, (dist - GRAPPLE_ROPE_LEN) * 0.25 + 3);
+      player.vx += ((dx / dist) * sp - player.vx) * 0.3;
+      player.vy += ((dy / dist) * sp - player.vy) * 0.3;
+      moveAndCollide(player, platforms, worldWidth, worldHeight, 0);
+      // Blocked on the way: swing from where we are
+      if (Math.hypot(player.vx, player.vy) < 0.4) hook.stuck++; else hook.stuck = 0;
+      if (hook.stuck > 15) {
+        hook.phase = 'swinging';
+        hook.len = Math.hypot(hook.ax - (player.x + player.width / 2), hook.ay - (player.y + player.height / 2));
+      }
       return;
     }
-    const sp = Math.min(GRAPPLE_PULL_SPEED, dist * 0.2 + 2);
-    player.vx += ((dx / dist) * sp - player.vx) * 0.3;
-    player.vy += ((dy / dist) * sp - player.vy) * 0.3;
+  }
+
+  if (input.hook && input.hook.phase === 'swinging') {
+    // Pendulum: gravity + optional pumping, then hold the player exactly one rope length from the anchor
+    player.vy -= GRAPPLE_GRAVITY;
+    if (input.left) player.vx -= GRAPPLE_PUMP;
+    if (input.right) player.vx += GRAPPLE_PUMP;
+    player.vx *= 0.999;
+    player.vy *= 0.999;
     moveAndCollide(player, platforms, worldWidth, worldHeight, 0);
-    // Blocked on the way: hang where we are
-    if (Math.hypot(player.vx, player.vy) < 0.4) hook.stuck++; else hook.stuck = 0;
-    if (hook.stuck > 15) {
-      hook.phase = 'hanging';
-      hook.ax = player.x + player.width / 2;
-      hook.ay = player.y + player.height / 2;
+    const px = player.x + player.width / 2;
+    const py = player.y + player.height / 2;
+    const rx = px - hook.ax;
+    const ry = py - hook.ay;
+    const d = Math.hypot(rx, ry);
+    if (d > 0) {
+      const nx = rx / d;
+      const ny = ry / d;
+      player.x = hook.ax + nx * hook.len - player.width / 2;
+      player.y = hook.ay + ny * hook.len - player.height / 2;
+      const radial = player.vx * nx + player.vy * ny;
+      player.vx -= radial * nx;
+      player.vy -= radial * ny;
     }
+    player.onGround = false;
     return;
   }
 
@@ -518,46 +535,69 @@ function updateGrapplePhysics(player, platforms, input, worldWidth, worldHeight)
   moveAndCollide(player, platforms, worldWidth, worldHeight, 0);
 }
 
-function updateBouncePhysics(player, platforms, input, worldWidth, worldHeight, portals) {
-  player.vy -= BOUNCE_GRAVITY;
+function updateSnakePhysics(player, platforms, input, worldWidth, worldHeight, portals) {
+  const C = SNAKE_CELL;
+  let s = player.snake;
+  // (Re)initialise whenever something else moved the player: spawn, resize, debug teleport
+  if (!s || s.lastX !== player.x || s.lastY !== player.y) {
+    const col = Math.min(Math.round(player.x / C), Math.max(0, Math.floor((worldWidth - C) / C)));
+    s = player.snake = {
+      x: col * C, y: Math.ceil(player.y / C) * C,
+      dir: { x: 0, y: 1 }, next: null, state: 'idle', timer: 0, body: [],
+      lastX: 0, lastY: 0,
+    };
+    input.turn = null;
+  }
 
-  // Click impulse: additive, so repeated clicks stack into huge bounces
-  if (input.dashPressed) {
-    input.dashPressed = false;
-    const px = player.x + player.width / 2;
-    const py = player.y + player.height / 2;
-    const dx = input.dashTargetX - px;
-    const dy = input.dashTargetY - py;
-    const dist = Math.hypot(dx, dy);
-    if (dist > 1) {
-      player.vx += (dx / dist) * BOUNCE_DASH_IMPULSE;
-      player.vy += (dy / dist) * BOUNCE_DASH_IMPULSE;
+  // Turn on key press (latched so a quick tap is never missed), never straight back into the body
+  let turn = null;
+  if (input.turn === 'up') turn = { x: 0, y: 1 };
+  else if (input.turn === 'down') turn = { x: 0, y: -1 };
+  else if (input.turn === 'left') turn = { x: -1, y: 0 };
+  else if (input.turn === 'right') turn = { x: 1, y: 0 };
+  input.turn = null;
+  if (turn && !(s.body.length && turn.x === -s.dir.x && turn.y === -s.dir.y)) {
+    s.next = turn;
+    if (s.state !== 'moving') { s.state = 'moving'; s.timer = SNAKE_STEP; }
+  }
+
+  if (s.state === 'moving' && ++s.timer >= SNAKE_STEP) {
+    s.timer = 0;
+    if (s.next) { s.dir = s.next; s.next = null; }
+    const nx = s.x + s.dir.x * C;
+    const ny = s.y + s.dir.y * C;
+    const cell = { x: nx, y: ny, width: C, height: C };
+
+    let crash = nx < 0 || ny < 0 || nx + C > worldWidth || ny + C > worldHeight;
+    for (let i = 0; !crash && i < platforms.length; i++) {
+      if (overlapsRect(cell, platforms[i])) crash = true;
+    }
+    // The tail cell is vacated this step, so it is not an obstacle
+    for (let i = s.body.length >= SNAKE_LEN - 1 ? 1 : 0; !crash && i < s.body.length; i++) {
+      if (s.body[i].x === nx + C / 2 && s.body[i].y === ny + C / 2) crash = true;
+    }
+
+    if (crash) {
+      s.state = 'crashed';
+    } else {
+      const wasInPortal = overlapsAnyPortal({ x: s.x, y: s.y, width: C, height: C }, portals);
+      s.body.push({ x: s.x + C / 2, y: s.y + C / 2 });
+      if (s.body.length > SNAKE_LEN - 1) s.body.shift();
+      s.x = nx;
+      s.y = ny;
+      // Stop on entering a portal so it can be held
+      if (!wasInPortal && overlapsAnyPortal(cell, portals)) s.state = 'docked';
     }
   }
 
-  if (input.left) player.vx -= BOUNCE_AIR_CONTROL;
-  if (input.right) player.vx += BOUNCE_AIR_CONTROL;
-
-  player.vx *= BOUNCE_DRAG_X;
-  player.vy *= BOUNCE_DRAG_Y;
-  const speed = Math.hypot(player.vx, player.vy);
-  if (speed > BOUNCE_MAX_SPEED) {
-    player.vx = (player.vx / speed) * BOUNCE_MAX_SPEED;
-    player.vy = (player.vy / speed) * BOUNCE_MAX_SPEED;
-  }
-
-  const impact = -player.vy;
-  player.prevY = player.y;
-  player.x += player.vx;
-  player.y += player.vy;
+  player.x = s.x;
+  player.y = s.y;
+  player.vx = 0;
+  player.vy = 0;
   player.onGround = false;
-  applyPlatformCollisions(player, platforms, worldWidth, worldHeight);
-
-  // Pogo: every landing launches again, except while settling inside a portal
-  if (player.onGround && impact > 0 && !overlapsAnyPortal(player, portals)) {
-    player.vy = Math.max(BOUNCE_MIN_SPEED, impact * BOUNCE_RESTITUTION);
-    player.onGround = false;
-  }
+  player.angle = Math.atan2(s.dir.y, s.dir.x);
+  s.lastX = player.x;
+  s.lastY = player.y;
 }
 
 function updatePhysics(player, platforms, input, worldWidth, worldHeight, movementType, portals) {
@@ -566,7 +606,7 @@ function updatePhysics(player, platforms, input, worldWidth, worldHeight, moveme
     case 'asteroids': return updateAsteroidsPhysics(player, platforms, input, worldWidth, worldHeight);
     case 'bird': return updateBirdPhysics(player, platforms, input, worldWidth, worldHeight);
     case 'grapple': return updateGrapplePhysics(player, platforms, input, worldWidth, worldHeight);
-    case 'bounce': return updateBouncePhysics(player, platforms, input, worldWidth, worldHeight, portals);
+    case 'snake': return updateSnakePhysics(player, platforms, input, worldWidth, worldHeight, portals);
     default: return updatePlatformerPhysics(player, platforms, input, worldWidth, worldHeight);
   }
 }
@@ -577,8 +617,8 @@ const NAV_HINTS = {
   spaceship: 'WASD to thrust · Hold in portals to navigate',
   asteroids: 'W / ↑ thrust · S / ↓ brake · A D / ← → rotate · Hold in portals to navigate',
   bird: 'Move your cursor — the bird follows and circles it · Hold in portals to navigate',
-  grapple: 'Click anywhere to throw the hook · S to let go · Hold in portals to navigate',
-  bounce: 'Click to launch toward the cursor · A D to steer · Hold in portals to navigate',
+  grapple: 'Click anywhere to throw the hook · you reel in, then swing on the rope · A D to pump the swing · S to let go · Hold in portals to navigate',
+  snake: 'WASD / arrows to steer the snake · it stops when it hits a wall, platform or itself — press a direction to move again · it stops in portals, wait to travel',
 };
 
 const TOUCH_HINTS = {
@@ -587,7 +627,7 @@ const TOUCH_HINTS = {
   asteroids: 'Left/right rotate · Up thrust · Down brake · Hold in portals',
   bird: 'Drag a finger — the bird follows and circles it · Hold in portals',
   grapple: 'Tap anywhere to throw the hook · Hold in portals',
-  bounce: 'Tap to launch toward the tap · Hold in portals',
+  snake: 'D-pad steers the snake · it stops when it crashes — press a direction to move again · wait in portals',
 };
 
 function TouchButton({ label, className = '', onPress, onRelease, children }) {
@@ -701,7 +741,6 @@ export default function GameWorld({
     thrustUp: false, thrustDown: false, thrustLeft: false, thrustRight: false,
     boost: false,
     hook: null, hookFire: null,
-    dashPressed: false, dashTargetX: 0, dashTargetY: 0,
     mouseWorldX: 0, mouseWorldY: 0,
     cursorClientX: null, cursorClientY: null,
   });
@@ -805,13 +844,13 @@ export default function GameWorld({
   // Touch controls — mirror keyboard input flags
   const pressDirection = (dir) => {
     const inp = input.current;
-    if (dir === 'left') { inp.left = true; inp.thrustLeft = true; }
-    if (dir === 'right') { inp.right = true; inp.thrustRight = true; }
+    if (dir === 'left') { inp.left = true; inp.thrustLeft = true; inp.turn = 'left'; }
+    if (dir === 'right') { inp.right = true; inp.thrustRight = true; inp.turn = 'right'; }
     if (dir === 'up') {
-      inp.up = true; inp.thrustUp = true;
+      inp.up = true; inp.thrustUp = true; inp.turn = 'up';
       if (movementTypeRef.current === 'platformer') inp.jumpPressed = true;
     }
-    if (dir === 'down') { inp.down = true; inp.thrustDown = true; }
+    if (dir === 'down') { inp.down = true; inp.thrustDown = true; inp.turn = 'down'; }
   };
   const releaseDirection = (dir) => {
     const inp = input.current;
@@ -897,7 +936,6 @@ export default function GameWorld({
 
       const inp = input.current;
       inp.hook = null;
-      inp.dashTargetX *= scale;
       trailRef.current = trailRef.current.map((dot) => ({ ...dot, x: dot.x * scale }));
     }
 
@@ -948,20 +986,20 @@ export default function GameWorld({
 
       switch (key) {
         case 'a': case 'ArrowLeft':
-          inp.left = true; inp.thrustLeft = true;
+          inp.left = true; inp.thrustLeft = true; if (!e.repeat) inp.turn = 'left';
           if (shouldPreventDefault) e.preventDefault();
           break;
         case 'd': case 'ArrowRight':
-          inp.right = true; inp.thrustRight = true;
+          inp.right = true; inp.thrustRight = true; if (!e.repeat) inp.turn = 'right';
           if (shouldPreventDefault) e.preventDefault();
           break;
         case 'w': case 'ArrowUp':
-          inp.up = true; inp.thrustUp = true;
+          inp.up = true; inp.thrustUp = true; if (!e.repeat) inp.turn = 'up';
           if (!e.repeat) inp.jumpPressed = true;
           if (shouldPreventDefault) e.preventDefault();
           break;
         case 's': case 'ArrowDown':
-          inp.down = true; inp.thrustDown = true;
+          inp.down = true; inp.thrustDown = true; if (!e.repeat) inp.turn = 'down';
           if (shouldPreventDefault) e.preventDefault();
           break;
         case 'Shift': inp.boost = true; break;
@@ -1026,7 +1064,7 @@ export default function GameWorld({
     };
   }, [updateMouseWorld]);
 
-  // Click handling for grapple and bounce
+  // Click handling for grapple
   useEffect(() => {
     const handleClick = (e) => {
       if (transitioningRef.current) return;
@@ -1042,10 +1080,6 @@ export default function GameWorld({
 
       if (mt === 'grapple') {
         input.current.hookFire = { x: worldX, y: worldY };
-      } else if (mt === 'bounce') {
-        input.current.dashPressed = true;
-        input.current.dashTargetX = worldX;
-        input.current.dashTargetY = worldY;
       }
     };
     window.addEventListener('click', handleClick);
@@ -1079,8 +1113,8 @@ export default function GameWorld({
         portalsRef.current
       );
 
-      // Update trail for spaceship, bird, bounce
-      if (mt === 'spaceship' || mt === 'bird' || mt === 'bounce') {
+      // Update trail for spaceship and bird (the snake keeps its own body)
+      if (mt === 'spaceship' || mt === 'bird') {
         const t = trailRef.current;
         t.push({ x: player.current.x + player.current.width / 2, y: player.current.y + player.current.height / 2 });
         if (t.length > 20) t.shift();
@@ -1130,17 +1164,22 @@ export default function GameWorld({
         // CSS rotation is clockwise; the physics angle is counter-clockwise from +x
         el.style.transform = `rotate(${Math.PI / 2 - player.current.angle}rad)`;
         el.dataset.thrust = movementTypeRef.current === 'asteroids' && player.current.thrusting ? '1' : '0';
+        el.dataset.snake = movementTypeRef.current === 'snake' && player.current.snake ? player.current.snake.state : '';
       }
 
       // Update trail DOM using cached refs
-      const trail = trailRef.current;
+      const snakeMode = movementTypeRef.current === 'snake';
+      const trail = snakeMode ? (player.current.snake ? player.current.snake.body : []) : trailRef.current;
       const dots = trailDotsRef.current;
-      for (let i = 0; i < trail.length; i++) {
+      for (let i = 0; i < dots.length; i++) {
         const dot = dots[i];
-        if (dot) {
+        if (!dot) continue;
+        if (i < trail.length) {
           dot.style.left = trail[i].x + 'px';
           dot.style.bottom = trail[i].y + 'px';
-          dot.style.opacity = String((i / trail.length) * 0.4);
+          dot.style.opacity = snakeMode ? String(0.35 + 0.55 * ((i + 1) / trail.length)) : String((i / trail.length) * 0.4);
+        } else if (snakeMode) {
+          dot.style.opacity = '0';
         }
       }
 
@@ -1246,7 +1285,7 @@ export default function GameWorld({
   }, []);
 
   // Trail dots for certain movement types
-  const showTrail = movementType === 'spaceship' || movementType === 'bird' || movementType === 'bounce';
+  const showTrail = movementType === 'spaceship' || movementType === 'bird' || movementType === 'snake';
   const trailDots = showTrail ? Array.from({ length: 20 }, (_, i) => i) : [];
 
   return (
@@ -1358,7 +1397,7 @@ export default function GameWorld({
             key={`trail-${i}`}
             ref={(el) => registerTrailDot(el, i)}
             data-trail={i}
-            className="absolute w-2 h-2 rounded-full bg-white pointer-events-none -translate-x-1/2 translate-y-1/2"
+            className={`absolute pointer-events-none -translate-x-1/2 translate-y-1/2 ${movementType === 'snake' ? 'snake-seg' : 'w-2 h-2 rounded-full bg-white'}`}
             style={{ left: 0, bottom: 0, opacity: 0 }}
           />
         ))}
