@@ -1,5 +1,6 @@
 import { useRef, useEffect, useLayoutEffect, useCallback, useState, useMemo } from 'react';
 import { PORTAL_ICONS } from './pageData';
+import { measureContentBlocks, solveLayout } from './layout';
 
 // === Base physics constants ===
 const GRAVITY = 0.5;
@@ -13,33 +14,42 @@ const FIXED_STEP = 1000 / 60;
 const MAX_STEPS_PER_FRAME = 5;
 
 // === Movement system constants ===
-const TANK_ROT_SPEED = 0.06;
-const TANK_MOVE_SPEED = 3.5;
-const TANK_BACK_SPEED = 1.8;
-const TANK_FRICTION = 0.85;
-const TANK_GRAVITY = 0.3;
-
 const SPACE_THRUST = 0.5;
 const SPACE_MAX_SPEED = 8;
 const SPACE_DRAG = 0.99;
+const SPACE_BOUNCE = 0.3;
 
-const FLIGHT_SPEED = 4;
-const FLIGHT_BOOST_SPEED = 8;
-const FLIGHT_TURN_RATE = 0.06;
-const FLIGHT_DRAG = 0.995;
+// Asteroids-style ship: rotate, thrust along the nose, floaty inertia
+const SHIP_TURN = 0.065;
+const SHIP_THRUST = 0.14;
+const SHIP_BRAKE = 0.955;
+const SHIP_DRAG = 0.9965;
+const SHIP_MAX_SPEED = 9;
+const SHIP_BOUNCE = 0.45;
 
-const GRAPPLE_PULL = 0.8;
-const GRAPPLE_MAX_SPEED = 12;
-const GRAPPLE_DRAG = 0.99;
-const GRAPPLE_GRAVITY = 0.25;
-const GRAPPLE_RANGE = 500;
-const GRAPPLE_RETRACT_SPEED = 20;
+// Bird: circle that chases the cursor, then orbits it
+const BIRD_MAX_SPEED = 16;
+const BIRD_STEER = 0.1;
+const BIRD_ORBIT_RADIUS = 72;
+const BIRD_ORBIT_SPEED = 3;
+const BIRD_MIN_DIST = 42;
 
-const BOUNCE_DASH_SPEED = 8;
-const BOUNCE_GRAVITY = 0.35;
-const BOUNCE_DRAG = 0.985;
-const BOUNCE_FACTOR = 0.6;
-const BOUNCE_AIR_CONTROL = 0.3;
+// Grappling hook
+const GRAPPLE_GRAVITY = 0.4;
+const GRAPPLE_HOOK_SPEED = 46;
+const GRAPPLE_PULL_SPEED = 20;
+const GRAPPLE_RANGE = 2400;
+const GRAPPLE_STANDOFF = 14;
+
+// Pogo ball
+const BOUNCE_GRAVITY = 0.45;
+const BOUNCE_DRAG_X = 0.99;
+const BOUNCE_DRAG_Y = 0.9985;
+const BOUNCE_RESTITUTION = 0.97;
+const BOUNCE_MIN_SPEED = 13.5;
+const BOUNCE_DASH_IMPULSE = 15;
+const BOUNCE_MAX_SPEED = 26;
+const BOUNCE_AIR_CONTROL = 0.35;
 const MAX_LAYOUT_WIDTH = 1400;
 
 
@@ -186,102 +196,175 @@ function updatePlatformerPhysics(player, platforms, input, worldWidth, worldHeig
   applyPlatformCollisions(player, platforms, worldWidth, worldHeight);
 }
 
-function updateTankPhysics(player, platforms, input, worldWidth, worldHeight) {
-  // Rotation: A/D or Left/Right
-  if (input.left) player.angle -= TANK_ROT_SPEED;
-  if (input.right) player.angle += TANK_ROT_SPEED;
+function overlapsRect(a, p) {
+  return a.x < p.x + p.width && a.x + a.width > p.x && a.y < p.y + p.height && a.y + a.height > p.y;
+}
 
-  // Movement in facing direction
-  if (input.up) {
-    player.vx = Math.cos(player.angle) * TANK_MOVE_SPEED;
-    player.vy = Math.sin(player.angle) * TANK_MOVE_SPEED;
-  } else if (input.down) {
-    player.vx = -Math.cos(player.angle) * TANK_BACK_SPEED;
-    player.vy = -Math.sin(player.angle) * TANK_BACK_SPEED;
-  } else {
-    player.vx *= TANK_FRICTION;
-    player.vy *= TANK_FRICTION;
+/**
+ * Solid movement: platforms block from every side (axis-separated), world
+ * edges are walls. `restitution` scales the rebound velocity (0 = stop dead).
+ * Sets onGround when resting on something below.
+ */
+function moveAndCollide(player, platforms, worldWidth, worldHeight, restitution) {
+  player.onGround = false;
+  player.prevY = player.y;
+
+  player.x += player.vx;
+  for (let i = 0; i < platforms.length; i++) {
+    const p = platforms[i];
+    if (!overlapsRect(player, p)) continue;
+    if (player.vx > 0) player.x = p.x - player.width;
+    else if (player.vx < 0) player.x = p.x + p.width;
+    else continue;
+    player.vx = -player.vx * restitution;
   }
 
-  player.prevY = player.y;
-  player.x += player.vx;
   player.y += player.vy;
+  for (let i = 0; i < platforms.length; i++) {
+    const p = platforms[i];
+    if (!overlapsRect(player, p)) continue;
+    if (player.vy < 0) {
+      player.y = p.y + p.height;
+      player.onGround = true;
+    } else if (player.vy > 0) {
+      player.y = p.y - player.height;
+    } else continue;
+    player.vy = -player.vy * restitution;
+  }
 
-  // Drives freely, but stays inside the world bounds
-  player.onGround = false;
-  clampToWorld(player, worldWidth, worldHeight);
+  const maxX = worldWidth - player.width;
+  const maxY = worldHeight - player.height;
+  if (player.x < 0) { player.x = 0; if (player.vx < 0) player.vx = -player.vx * restitution; }
+  else if (player.x > maxX) { player.x = maxX; if (player.vx > 0) player.vx = -player.vx * restitution; }
+  if (player.y < 0) {
+    player.y = 0;
+    if (player.vy < 0) player.vy = -player.vy * restitution;
+    player.onGround = true;
+  } else if (player.y > maxY) {
+    player.y = maxY;
+    if (player.vy > 0) player.vy = -player.vy * restitution;
+  }
 }
 
 function updateSpaceshipPhysics(player, platforms, input, worldWidth, worldHeight) {
-  // Thrust from WASD — applies force in the direction pressed
-  if (input.thrustUp) player.vy += SPACE_THRUST;
-  if (input.thrustDown) player.vy -= SPACE_THRUST;
-  if (input.thrustLeft) player.vx -= SPACE_THRUST;
-  if (input.thrustRight) player.vx += SPACE_THRUST;
+  let ax = 0;
+  let ay = 0;
+  if (input.left) ax -= 1;
+  if (input.right) ax += 1;
+  if (input.up) ay += 1;
+  if (input.down) ay -= 1;
+  if (ax !== 0 && ay !== 0) { ax *= Math.SQRT1_2; ay *= Math.SQRT1_2; }
 
-  // No gravity — pure zero-g
-
-  // Drag — very slight to prevent infinite acceleration
+  player.vx += ax * SPACE_THRUST;
+  player.vy += ay * SPACE_THRUST;
   player.vx *= SPACE_DRAG;
   player.vy *= SPACE_DRAG;
 
-  // Speed cap
-  const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+  const speed = Math.hypot(player.vx, player.vy);
   if (speed > SPACE_MAX_SPEED) {
-    const scale = SPACE_MAX_SPEED / speed;
-    player.vx *= scale;
-    player.vy *= scale;
+    player.vx = (player.vx / speed) * SPACE_MAX_SPEED;
+    player.vy = (player.vy / speed) * SPACE_MAX_SPEED;
   }
 
-  // Angle faces velocity direction for visual rotation
-  if (Math.abs(player.vx) > 0.5 || Math.abs(player.vy) > 0.5) {
-    player.angle = Math.atan2(player.vy, player.vx);
-  }
-
-  player.prevY = player.y;
-  player.x += player.vx;
-  player.y += player.vy;
-
-  // No platform collision in zero-g, but stay inside the world bounds
-  player.onGround = false;
-  clampToWorld(player, worldWidth, worldHeight);
+  moveAndCollide(player, platforms, worldWidth, worldHeight, SPACE_BOUNCE);
+  if (speed > 0.3) player.angle = Math.atan2(player.vy, player.vx);
 }
 
-function updateFlightPhysics(player, platforms, input, worldWidth, worldHeight) {
-  // Turn: A/D or Left/Right rotates the facing angle
-  if (input.left) player.angle -= FLIGHT_TURN_RATE;
-  if (input.right) player.angle += FLIGHT_TURN_RATE;
+function updateAsteroidsPhysics(player, platforms, input, worldWidth, worldHeight) {
+  if (input.left) player.angle += SHIP_TURN;
+  if (input.right) player.angle -= SHIP_TURN;
 
-  // Forward: W/Up applies thrust in facing direction
-  const thrusting = input.up || input.thrustUp;
-  const speed = input.boost ? FLIGHT_BOOST_SPEED : FLIGHT_SPEED;
+  player.thrusting = !!input.up;
+  if (player.thrusting) {
+    player.vx += Math.cos(player.angle) * SHIP_THRUST;
+    player.vy += Math.sin(player.angle) * SHIP_THRUST;
+  }
+  if (input.down) {
+    player.vx *= SHIP_BRAKE;
+    player.vy *= SHIP_BRAKE;
+    if (Math.hypot(player.vx, player.vy) < 0.05) { player.vx = 0; player.vy = 0; }
+  }
+  player.vx *= SHIP_DRAG;
+  player.vy *= SHIP_DRAG;
 
-  if (thrusting) {
-    player.vx += Math.cos(player.angle) * speed * 0.08;
-    player.vy += Math.sin(player.angle) * speed * 0.08;
+  const speed = Math.hypot(player.vx, player.vy);
+  if (speed > SHIP_MAX_SPEED) {
+    player.vx = (player.vx / speed) * SHIP_MAX_SPEED;
+    player.vy = (player.vy / speed) * SHIP_MAX_SPEED;
   }
 
-  // Drag
-  player.vx *= FLIGHT_DRAG;
-  player.vy *= FLIGHT_DRAG;
+  moveAndCollide(player, platforms, worldWidth, worldHeight, SHIP_BOUNCE);
+}
 
-  // Clamp speed
-  const maxSpd = input.boost ? FLIGHT_BOOST_SPEED : FLIGHT_SPEED;
-  const spd = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
-  if (spd > maxSpd) {
-    const s = maxSpd / spd;
-    player.vx *= s;
-    player.vy *= s;
+function updateBirdPhysics(player, platforms, input, worldWidth, worldHeight) {
+  player.orbitT = (player.orbitT || 0) + 0.035;
+  const hasCursor = input.cursorClientX != null;
+  let ux = 1;
+  let uy = 0;
+
+  if (!hasCursor) {
+    // Idle hover until the cursor appears
+    player.vx *= 0.92;
+    player.vy = player.vy * 0.92 + Math.sin(player.orbitT) * 0.03;
+    player.prevCX = null;
+  } else {
+    const cx = input.mouseWorldX;
+    const cy = input.mouseWorldY;
+    let cvx = 0;
+    let cvy = 0;
+    if (player.prevCX != null) {
+      cvx = cx - player.prevCX;
+      cvy = cy - player.prevCY;
+      const m = Math.hypot(cvx, cvy);
+      if (m > BIRD_MAX_SPEED) { cvx = (cvx / m) * BIRD_MAX_SPEED; cvy = (cvy / m) * BIRD_MAX_SPEED; }
+    }
+    player.prevCX = cx;
+    player.prevCY = cy;
+
+    let rx = player.x + player.width / 2 - cx;
+    let ry = player.y + player.height / 2 - cy;
+    let d = Math.hypot(rx, ry);
+    if (d < 1) { rx = 1; ry = 0; d = 1; }
+    ux = rx / d;
+    uy = ry / d;
+
+    const radius = BIRD_ORBIT_RADIUS + Math.sin(player.orbitT * 0.7) * 8;
+    const radial = Math.max(-BIRD_MAX_SPEED, Math.min(BIRD_MAX_SPEED, (radius - d) * 0.12));
+    // Tangent (counter-clockwise) keeps it circling when the cursor is still
+    const dvx = cvx * 0.9 - uy * BIRD_ORBIT_SPEED + ux * radial;
+    const dvy = cvy * 0.9 + ux * BIRD_ORBIT_SPEED + uy * radial;
+    player.vx += (dvx - player.vx) * BIRD_STEER;
+    player.vy += (dvy - player.vy) * BIRD_STEER;
   }
 
-  // No gravity
+  const speed = Math.hypot(player.vx, player.vy);
+  if (speed > BIRD_MAX_SPEED) {
+    player.vx = (player.vx / speed) * BIRD_MAX_SPEED;
+    player.vy = (player.vy / speed) * BIRD_MAX_SPEED;
+  }
 
-  player.prevY = player.y;
+  // The bird flies freely (platforms don't block it); only the world edges do.
   player.x += player.vx;
   player.y += player.vy;
+  if (player.x < 0) { player.x = 0; player.vx = Math.abs(player.vx) * 0.3; }
+  else if (player.x > worldWidth - player.width) { player.x = worldWidth - player.width; player.vx = -Math.abs(player.vx) * 0.3; }
+  if (player.y < 0) { player.y = 0; player.vy = Math.abs(player.vy) * 0.3; }
+  else if (player.y > worldHeight - player.height) { player.y = worldHeight - player.height; player.vy = -Math.abs(player.vy) * 0.3; }
   player.onGround = false;
 
-  applyPlatformCollisions(player, platforms, worldWidth, worldHeight);
+  if (hasCursor) {
+    // Never touch the cursor: hard minimum distance
+    const rx = player.x + player.width / 2 - input.mouseWorldX;
+    const ry = player.y + player.height / 2 - input.mouseWorldY;
+    const d = Math.hypot(rx, ry);
+    if (d < BIRD_MIN_DIST) {
+      const nx = d > 0.5 ? rx / d : ux;
+      const ny = d > 0.5 ? ry / d : uy;
+      player.x = input.mouseWorldX + nx * BIRD_MIN_DIST - player.width / 2;
+      player.y = input.mouseWorldY + ny * BIRD_MIN_DIST - player.height / 2;
+    }
+  }
+  if (Math.hypot(player.vx, player.vy) > 0.6) player.angle = Math.atan2(player.vy, player.vx);
 }
 
 /**
@@ -357,138 +440,129 @@ function grappleRaycast(player, platforms, targetX, targetY, maxRange) {
 }
 
 function updateGrapplePhysics(player, platforms, input, worldWidth, worldHeight) {
-  // Gravity
-  player.vy -= GRAPPLE_GRAVITY;
+  const cx = player.x + player.width / 2;
+  const cy = player.y + player.height / 2;
 
-  // Grapple: shoot ray toward target on click, attach to platform
-  if (input.grappleFirePressed) {
-    const hit = grappleRaycast(player, platforms, input.grappleTargetX, input.grappleTargetY, GRAPPLE_RANGE);
-    if (hit) {
-      input.grappleActive = true;
-      input.grappleAttachX = hit.x;
-      input.grappleAttachY = hit.y;
-      // Allow the pull to carry us off the platform we fired from.
-      input.grappleIgnorePlatform = player.onGround
-        ? platforms.find((p) =>
-            Math.abs((p.y + p.height) - player.y) < 1 &&
-            player.x + player.width > p.x &&
-            player.x < p.x + p.width
-          ) || null
-        : null;
-    }
-    input.grappleFirePressed = false;
-  }
+  // S / Down lets go
+  if (input.down && input.hook) input.hook = null;
 
-  // Release grapple on second click
-  if (input.grappleReleasePressed) {
-    input.grappleActive = false;
-    input.grappleIgnorePlatform = null;
-    input.grappleReleasePressed = false;
-  }
-
-  // Pull toward attachment point
-  if (input.grappleActive && input.grappleAttachX !== undefined) {
-    const dx = input.grappleAttachX - (player.x + player.width / 2);
-    const dy = input.grappleAttachY - (player.y + player.height / 2);
-    const dist = Math.sqrt(dx * dx + dy * dy);
+  if (input.hookFire) {
+    const t = input.hookFire;
+    input.hookFire = null;
+    const dx = t.x - cx;
+    const dy = t.y - cy;
+    const dist = Math.hypot(dx, dy);
     if (dist > 8) {
-      player.vx += (dx / dist) * GRAPPLE_PULL;
-      player.vy += (dy / dist) * GRAPPLE_PULL;
-    } else {
-      // Reached attachment point, release
-      input.grappleActive = false;
+      const nx = dx / dist;
+      const ny = dy / dist;
+      const range = Math.min(dist, GRAPPLE_RANGE);
+      const hit = grappleRaycast(player, platforms, cx + nx * range, cy + ny * range, range);
+      const reach = hit ? Math.hypot(hit.x - cx, hit.y - cy) : range;
+      const anchorDist = hit ? Math.max(0, reach - GRAPPLE_STANDOFF) : reach;
+      input.hook = {
+        phase: 'flying',
+        ox: cx, oy: cy, dx: nx, dy: ny,
+        tip: 0, reach,
+        ax: cx + nx * anchorDist,
+        ay: cy + ny * anchorDist,
+        stuck: 0,
+      };
     }
   }
 
-  // Drag
-  player.vx *= GRAPPLE_DRAG;
-  player.vy *= GRAPPLE_DRAG;
+  const hook = input.hook;
 
-  // Speed cap
-  const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
-  if (speed > GRAPPLE_MAX_SPEED) {
-    const scale = GRAPPLE_MAX_SPEED / speed;
-    player.vx *= scale;
-    player.vy *= scale;
-  }
-
-  player.prevY = player.y;
-  player.x += player.vx;
-  player.y += player.vy;
-  player.onGround = false;
-
-  applyPlatformCollisions(
-    player,
-    platforms,
-    worldWidth,
-    worldHeight,
-    input.grappleActive ? input.grappleIgnorePlatform : null
-  );
-
-  // Landing ends the pull so the player doesn't stay tethered to the platform
-  if (player.onGround && input.grappleActive) {
-    input.grappleActive = false;
-    input.grappleIgnorePlatform = null;
+  if (hook && hook.phase === 'hanging') {
     player.vx = 0;
     player.vy = 0;
+    player.x = hook.ax - player.width / 2;
+    player.y = hook.ay - player.height / 2;
+    player.onGround = false;
+    return;
   }
+
+  if (hook && hook.phase === 'flying') {
+    hook.tip = Math.min(hook.reach, hook.tip + GRAPPLE_HOOK_SPEED);
+    if (hook.tip >= hook.reach) hook.phase = 'pulling';
+  }
+
+  if (hook && hook.phase === 'pulling') {
+    const dx = hook.ax - cx;
+    const dy = hook.ay - cy;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 6) {
+      hook.phase = 'hanging';
+      player.vx = 0;
+      player.vy = 0;
+      return;
+    }
+    const sp = Math.min(GRAPPLE_PULL_SPEED, dist * 0.2 + 2);
+    player.vx += ((dx / dist) * sp - player.vx) * 0.3;
+    player.vy += ((dy / dist) * sp - player.vy) * 0.3;
+    moveAndCollide(player, platforms, worldWidth, worldHeight, 0);
+    // Blocked on the way: hang where we are
+    if (Math.hypot(player.vx, player.vy) < 0.4) hook.stuck++; else hook.stuck = 0;
+    if (hook.stuck > 15) {
+      hook.phase = 'hanging';
+      hook.ax = player.x + player.width / 2;
+      hook.ay = player.y + player.height / 2;
+    }
+    return;
+  }
+
+  // Free fall (no hook, or hook still flying)
+  player.vy -= GRAPPLE_GRAVITY;
+  player.vx *= player.onGround ? 0.8 : 0.99;
+  moveAndCollide(player, platforms, worldWidth, worldHeight, 0);
 }
 
 function updateBouncePhysics(player, platforms, input, worldWidth, worldHeight, portals) {
-  // Gravity
   player.vy -= BOUNCE_GRAVITY;
 
-  // Dash on click
-  if (input.dashPressed && input.dashTargetX !== undefined) {
-    const dx = input.dashTargetX - (player.x + player.width / 2);
-    const dy = input.dashTargetY - (player.y + player.height / 2);
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist > 5) {
-      player.vx = (dx / dist) * BOUNCE_DASH_SPEED;
-      player.vy = (dy / dist) * BOUNCE_DASH_SPEED;
-    }
+  // Click impulse: additive, so repeated clicks stack into huge bounces
+  if (input.dashPressed) {
     input.dashPressed = false;
+    const px = player.x + player.width / 2;
+    const py = player.y + player.height / 2;
+    const dx = input.dashTargetX - px;
+    const dy = input.dashTargetY - py;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 1) {
+      player.vx += (dx / dist) * BOUNCE_DASH_IMPULSE;
+      player.vy += (dy / dist) * BOUNCE_DASH_IMPULSE;
+    }
   }
 
-  // Air control — gentle steering with arrow keys
   if (input.left) player.vx -= BOUNCE_AIR_CONTROL;
   if (input.right) player.vx += BOUNCE_AIR_CONTROL;
-  if (input.up) player.vy += BOUNCE_AIR_CONTROL;
-  if (input.down) player.vy -= BOUNCE_AIR_CONTROL;
 
-  // Drag
-  player.vx *= BOUNCE_DRAG;
-  player.vy *= BOUNCE_DRAG;
-
-  // Angle follows velocity
-  if (Math.abs(player.vx) > 0.5 || Math.abs(player.vy) > 0.5) {
-    player.angle = Math.atan2(player.vy, player.vx);
+  player.vx *= BOUNCE_DRAG_X;
+  player.vy *= BOUNCE_DRAG_Y;
+  const speed = Math.hypot(player.vx, player.vy);
+  if (speed > BOUNCE_MAX_SPEED) {
+    player.vx = (player.vx / speed) * BOUNCE_MAX_SPEED;
+    player.vy = (player.vy / speed) * BOUNCE_MAX_SPEED;
   }
 
+  const impact = -player.vy;
   player.prevY = player.y;
   player.x += player.vx;
   player.y += player.vy;
   player.onGround = false;
-
   applyPlatformCollisions(player, platforms, worldWidth, worldHeight);
 
-  // Bouncy platforms — gentle bounce after collision resolves, but let the
-  // player settle inside a portal so it can be held.
-  if (player.onGround && !overlapsAnyPortal(player, portals)) {
-    const fallDist = Math.abs(player.prevY - player.y);
-    if (fallDist > 10) {
-      player.vy = fallDist * BOUNCE_FACTOR;
-      player.onGround = false;
-    }
+  // Pogo: every landing launches again, except while settling inside a portal
+  if (player.onGround && impact > 0 && !overlapsAnyPortal(player, portals)) {
+    player.vy = Math.max(BOUNCE_MIN_SPEED, impact * BOUNCE_RESTITUTION);
+    player.onGround = false;
   }
 }
 
-// === Physics dispatcher ===
 function updatePhysics(player, platforms, input, worldWidth, worldHeight, movementType, portals) {
   switch (movementType) {
-    case 'tank': return updateTankPhysics(player, platforms, input, worldWidth, worldHeight);
     case 'spaceship': return updateSpaceshipPhysics(player, platforms, input, worldWidth, worldHeight);
-    case 'flight': return updateFlightPhysics(player, platforms, input, worldWidth, worldHeight);
+    case 'asteroids': return updateAsteroidsPhysics(player, platforms, input, worldWidth, worldHeight);
+    case 'bird': return updateBirdPhysics(player, platforms, input, worldWidth, worldHeight);
     case 'grapple': return updateGrapplePhysics(player, platforms, input, worldWidth, worldHeight);
     case 'bounce': return updateBouncePhysics(player, platforms, input, worldWidth, worldHeight, portals);
     default: return updatePlatformerPhysics(player, platforms, input, worldWidth, worldHeight);
@@ -498,20 +572,20 @@ function updatePhysics(player, platforms, input, worldWidth, worldHeight, moveme
 // === Nav hints ===
 const NAV_HINTS = {
   platformer: 'WASD to move · Hold in portals to navigate',
-  tank: '← → to rotate · ↑ ↓ to move · Hold in portals to navigate',
   spaceship: 'WASD to thrust · Hold in portals to navigate',
-  flight: 'W to thrust · A/D to turn · Shift to boost · Hold in portals to navigate',
-  grapple: 'Click to grapple · Momentum carries · Hold in portals to navigate',
-  bounce: 'Click to dash · Bounce on platforms · Hold in portals to navigate',
+  asteroids: 'W / ↑ thrust · S / ↓ brake · A D / ← → rotate · Hold in portals to navigate',
+  bird: 'Move your cursor — the bird follows and circles it · Hold in portals to navigate',
+  grapple: 'Click anywhere to throw the hook · S to let go · Hold in portals to navigate',
+  bounce: 'Click to launch toward the cursor · A D to steer · Hold in portals to navigate',
 };
 
 const TOUCH_HINTS = {
   platformer: 'D-pad to move · JUMP to jump · Hold in portals',
-  tank: 'D-pad to rotate & drive · Hold in portals',
   spaceship: 'D-pad to thrust · Hold in portals',
-  flight: 'D-pad to turn & thrust · BOOST to speed up · Hold in portals',
-  grapple: 'Tap to grapple · Tap again to release · Hold in portals',
-  bounce: 'Tap to dash · Bounce on platforms · Hold in portals',
+  asteroids: 'Left/right rotate · Up thrust · Down brake · Hold in portals',
+  bird: 'Drag a finger — the bird follows and circles it · Hold in portals',
+  grapple: 'Tap anywhere to throw the hook · Hold in portals',
+  bounce: 'Tap to launch toward the tap · Hold in portals',
 };
 
 function TouchButton({ label, className = '', onPress, onRelease, children }) {
@@ -590,9 +664,12 @@ export default function GameWorld({
   const portalRingsRef = useRef([]);
   const containerRef = useRef(null);
   const trailRef = useRef([]);
+  const grappleSvgRef = useRef(null);
   const grappleLineRef = useRef(null);
   const grappleHookRef = useRef(null);
-  const grappleDotRef = useRef(null);
+  const cursorMarkerRef = useRef(null);
+  const contentRootRef = useRef(null);
+  const pendingSpawnRef = useRef(false);
   const trailDotsRef = useRef([]);
 
   const [worldWidth, setWorldWidth] = useState(window.innerWidth);
@@ -621,11 +698,10 @@ export default function GameWorld({
     up: false, down: false,
     thrustUp: false, thrustDown: false, thrustLeft: false, thrustRight: false,
     boost: false,
-    grappleActive: false, grappleTargetX: 0, grappleTargetY: 0,
-    grappleFirePressed: false, grappleReleasePressed: false,
-    grappleAttachX: 0, grappleAttachY: 0, grappleIgnorePlatform: null,
+    hook: null, hookFire: null,
     dashPressed: false, dashTargetX: 0, dashTargetY: 0,
     mouseWorldX: 0, mouseWorldY: 0,
+    cursorClientX: null, cursorClientY: null,
   });
 
   const cameraY = useRef(0);
@@ -633,15 +709,53 @@ export default function GameWorld({
   const prevPageIdRef = useRef(null);
   const prevWorldWidthRef = useRef(worldWidth);
 
-  // Resolved platforms/portals — memoized so references are stable
-  const resolvedPlatforms = useMemo(
+  const baseplatforms = useMemo(
     () => resolvePlatforms(pageData.platforms, worldWidth),
     [pageData.platforms, worldWidth]
   );
-  const resolvedPortals = useMemo(
+  const basePortals = useMemo(
     () => resolvePortals(pageData.portals, worldWidth),
     [pageData.portals, worldWidth]
   );
+
+  // Content-aware layout: platforms/portals/spawn are shifted off the cards.
+  // The home page is hand-tuned platforming and keeps its authored layout.
+  const needsSolve = (pageData.movementType || 'platformer') !== 'platformer';
+  const [solved, setSolved] = useState(null);
+  useLayoutEffect(() => {
+    if (!needsSolve) { setSolved(null); return undefined; }
+    const root = contentRootRef.current;
+    if (!root) return undefined;
+    let raf = 0;
+    let cancelled = false;
+    const run = () => {
+      if (cancelled) return;
+      const blocks = measureContentBlocks(root);
+      const result = solveLayout({
+        platforms: baseplatforms,
+        portals: basePortals,
+        spawnY: pageData.spawn.y,
+        worldWidth,
+        worldHeight: pageData.height,
+        blocks,
+      });
+      const sig = JSON.stringify(result);
+      setSolved((prev) => (prev && prev.sig === sig && prev.pageId === pageData.id && prev.width === worldWidth
+        ? prev
+        : { ...result, sig, pageId: pageData.id, width: worldWidth }));
+    };
+    run();
+    const schedule = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(run); };
+    const ro = new ResizeObserver(schedule);
+    ro.observe(root);
+    for (const child of root.children) ro.observe(child);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(schedule);
+    return () => { cancelled = true; cancelAnimationFrame(raf); ro.disconnect(); };
+  }, [needsSolve, pageData, worldWidth, baseplatforms, basePortals]);
+
+  const layout = needsSolve && solved && solved.pageId === pageData.id && solved.width === worldWidth ? solved : null;
+  const resolvedPlatforms = layout ? layout.platforms : baseplatforms;
+  const resolvedPortals = layout ? layout.portals : basePortals;
 
   // Sync refs for the game loop (updated synchronously during render)
   const platformsRef = useRef(resolvedPlatforms);
@@ -705,13 +819,9 @@ export default function GameWorld({
     if (dir === 'down') { inp.down = false; inp.thrustDown = false; }
   };
   const pressAction = () => {
-    const inp = input.current;
-    if (movementTypeRef.current === 'platformer') inp.jumpPressed = true;
-    else if (movementTypeRef.current === 'flight') inp.boost = true;
+    if (movementTypeRef.current === 'platformer') input.current.jumpPressed = true;
   };
-  const releaseAction = () => {
-    if (movementTypeRef.current === 'flight') input.current.boost = false;
-  };
+  const releaseAction = () => {};
 
   // Reset player on page change; preserve the player's position on resize
   useLayoutEffect(() => {
@@ -720,57 +830,78 @@ export default function GameWorld({
     const widthChanged = prevWidth !== worldWidth;
 
     if (pageChanged) {
-      const spawn = pageData.spawn;
-      const spawnBox = layoutBox(worldWidth);
-      player.current.x = spawnBox.left + (spawn.xPct / 100) * spawnBox.width - player.current.width / 2;
-      player.current.y = spawn.y;
+      pendingSpawnRef.current = true;
       player.current.vx = 0;
       player.current.vy = 0;
       player.current.onGround = false;
       player.current.jumpsLeft = MAX_JUMPS;
       player.current.angle = Math.PI / 2;
-      player.current.prevY = spawn.y;
+      player.current.thrusting = false;
+      player.current.prevCX = null;
       cameraY.current = 0;
       portalHolds.current.clear();
       trailRef.current = [];
       trailDotsRef.current = [];
+      const cursorX = input.current.cursorClientX;
+      const cursorY = input.current.cursorClientY;
       resetInputState(input.current);
-      input.current.grappleIgnorePlatform = null;
+      input.current.hook = null;
+      input.current.hookFire = null;
+      input.current.cursorClientX = cursorX;
+      input.current.cursorClientY = cursorY;
       setPageIndicator(pageData.label);
       setNavHint((isTouch ? TOUCH_HINTS : NAV_HINTS)[pageData.movementType] || NAV_HINTS.platformer);
-    } else if (widthChanged) {
+    }
+
+    // Place the player once the content-aware layout is ready (immediately
+    // on pages that keep their authored layout).
+    if (pendingSpawnRef.current && (!needsSolve || layout)) {
+      const spawn = pageData.spawn;
+      const spawnBox = layoutBox(worldWidth);
+      const p = player.current;
+      if (layout && layout.spawn) {
+        p.x = layout.spawn.x - p.width / 2;
+        p.y = layout.spawn.y;
+      } else {
+        p.x = spawnBox.left + (spawn.xPct / 100) * spawnBox.width - p.width / 2;
+        p.y = spawn.y;
+      }
+      p.prevY = p.y;
+      pendingSpawnRef.current = false;
+    } else if (!pageChanged && widthChanged) {
       const scale = worldWidth / Math.max(1, prevWidth);
       const p = player.current;
 
       // Platform widths are partly fixed-pixel, so scaling x alone can slide a
       // standing player off their platform. Keep the same offset from the
-      // platform's left edge instead.
+      // platform's left edge instead (authored layouts only).
       let newX = p.x * scale;
-      const oldPlatforms = resolvePlatforms(pageData.platforms, prevWidth);
-      const supportIndex = oldPlatforms.findIndex((op) =>
-        Math.abs((op.y + op.height) - p.y) < 1 &&
-        p.x + p.width > op.x &&
-        p.x < op.x + op.width
-      );
-      if (supportIndex !== -1) {
-        const np = resolvedPlatforms[supportIndex];
-        const offset = Math.min(p.x - oldPlatforms[supportIndex].x, Math.max(0, np.width - p.width));
-        newX = np.x + offset;
+      if (!needsSolve) {
+        const oldPlatforms = resolvePlatforms(pageData.platforms, prevWidth);
+        const supportIndex = oldPlatforms.findIndex((op) =>
+          Math.abs((op.y + op.height) - p.y) < 1 &&
+          p.x + p.width > op.x &&
+          p.x < op.x + op.width
+        );
+        if (supportIndex !== -1) {
+          const np = resolvedPlatforms[supportIndex];
+          const offset = Math.min(p.x - oldPlatforms[supportIndex].x, Math.max(0, np.width - p.width));
+          newX = np.x + offset;
+        }
       }
 
       p.x = Math.max(0, Math.min(newX, worldWidth - p.width));
       p.prevY = p.y;
 
       const inp = input.current;
-      inp.grappleAttachX *= scale;
-      inp.grappleTargetX *= scale;
+      inp.hook = null;
       inp.dashTargetX *= scale;
       trailRef.current = trailRef.current.map((dot) => ({ ...dot, x: dot.x * scale }));
     }
 
     prevPageIdRef.current = pageData.id;
     prevWorldWidthRef.current = worldWidth;
-  }, [pageData, worldWidth, isTouch]);
+  }, [pageData, worldWidth, isTouch, layout, needsSolve]);
 
   // Track coarse-pointer devices so touch controls only appear on touch screens
   useEffect(() => {
@@ -866,25 +997,39 @@ export default function GameWorld({
     };
   }, []);
 
-  // Mouse tracking — convert screen coords to world coords
+  // Pointer tracking — convert screen coords to world coords
   const updateMouseWorld = useCallback((clientX, clientY) => {
     const container = containerRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
+    input.current.cursorClientX = clientX;
+    input.current.cursorClientY = clientY;
     input.current.mouseWorldX = clientX - rect.left;
     input.current.mouseWorldY = pageDataRef.current.height - (clientY - rect.top) - container.scrollTop;
   }, []);
 
   useEffect(() => {
     const handleMouseMove = (e) => updateMouseWorld(e.clientX, e.clientY);
+    const handleTouch = (e) => {
+      const t = e.touches[0];
+      if (t) updateMouseWorld(t.clientX, t.clientY);
+    };
     window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
+    window.addEventListener('touchstart', handleTouch, { passive: true });
+    window.addEventListener('touchmove', handleTouch, { passive: true });
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('touchstart', handleTouch);
+      window.removeEventListener('touchmove', handleTouch);
+    };
   }, [updateMouseWorld]);
 
   // Click handling for grapple and bounce
   useEffect(() => {
     const handleClick = (e) => {
       if (transitioningRef.current) return;
+      // Real controls (mailto link, form fields, buttons) must not fire the game
+      if (e.target.closest && e.target.closest('a, button, input, textarea, select, label, [data-no-game-click]')) return;
       const mt = movementTypeRef.current;
       const container = containerRef.current;
       if (!container) return;
@@ -894,15 +1039,7 @@ export default function GameWorld({
       const worldY = pageDataRef.current.height - (e.clientY - rect.top) - container.scrollTop;
 
       if (mt === 'grapple') {
-        if (input.current.grappleActive) {
-          // Second click releases grapple
-          input.current.grappleReleasePressed = true;
-        } else {
-          // First click fires grapple toward click point
-          input.current.grappleFirePressed = true;
-          input.current.grappleTargetX = worldX;
-          input.current.grappleTargetY = worldY;
-        }
+        input.current.hookFire = { x: worldX, y: worldY };
       } else if (mt === 'bounce') {
         input.current.dashPressed = true;
         input.current.dashTargetX = worldX;
@@ -924,6 +1061,12 @@ export default function GameWorld({
       const mt = movementTypeRef.current;
       const pd = pageDataRef.current;
 
+      // The camera moves under a stationary pointer, so re-derive its world position
+      if (mt === 'bird' && input.current.cursorClientX != null) {
+        input.current.mouseWorldX = input.current.cursorClientX;
+        input.current.mouseWorldY = pd.height - input.current.cursorClientY - cameraY.current;
+      }
+
       updatePhysics(
         player.current,
         platformsRef.current,
@@ -934,8 +1077,8 @@ export default function GameWorld({
         portalsRef.current
       );
 
-      // Update trail for spaceship, flight, bounce
-      if (mt === 'spaceship' || mt === 'flight' || mt === 'bounce') {
+      // Update trail for spaceship, bird, bounce
+      if (mt === 'spaceship' || mt === 'bird' || mt === 'bounce') {
         const t = trailRef.current;
         t.push({ x: player.current.x + player.current.width / 2, y: player.current.y + player.current.height / 2 });
         if (t.length > 20) t.shift();
@@ -982,7 +1125,9 @@ export default function GameWorld({
       if (el) {
         el.style.left = player.current.x + 'px';
         el.style.bottom = player.current.y + 'px';
-        el.style.transform = `rotate(${player.current.angle - Math.PI / 2}rad)`;
+        // CSS rotation is clockwise; the physics angle is counter-clockwise from +x
+        el.style.transform = `rotate(${Math.PI / 2 - player.current.angle}rad)`;
+        el.dataset.thrust = movementTypeRef.current === 'asteroids' && player.current.thrusting ? '1' : '0';
       }
 
       // Update trail DOM using cached refs
@@ -997,32 +1142,32 @@ export default function GameWorld({
         }
       }
 
-      // Update grapple line DOM
-      const gl = grappleLineRef.current;
-      const hook = grappleHookRef.current;
-      const dot = grappleDotRef.current;
-      if (gl) {
-        const showLine = input.current.grappleActive || (input.current.grappleFirePressed && input.current.grappleTargetX);
-        const targetX = input.current.grappleActive ? input.current.grappleAttachX : input.current.grappleTargetX;
-        const targetY = input.current.grappleActive ? input.current.grappleAttachY : input.current.grappleTargetY;
-        if (showLine && targetX !== undefined) {
-          const worldHeight = pageDataRef.current.height;
+      // Update grappling hook DOM
+      const hookSvg = grappleSvgRef.current;
+      if (hookSvg) {
+        const hk = input.current.hook;
+        if (hk) {
+          const H = pageDataRef.current.height;
           const px = player.current.x + player.current.width / 2;
-          const py = player.current.y + player.current.height / 2;
-          const svgTargetY = worldHeight - targetY;
-          gl.setAttribute('x1', px);
-          gl.setAttribute('y1', worldHeight - py);
-          gl.setAttribute('x2', targetX);
-          gl.setAttribute('y2', svgTargetY);
-          gl.style.opacity = input.current.grappleActive ? '1' : '0.3';
-          gl.style.display = '';
-          // Position hook at target
-          if (hook) { hook.setAttribute('cx', targetX); hook.setAttribute('cy', svgTargetY); hook.style.display = ''; }
-          if (dot) { dot.setAttribute('cx', targetX); dot.setAttribute('cy', svgTargetY); dot.style.display = ''; }
+          const py = H - (player.current.y + player.current.height / 2);
+          const tx = hk.ox + hk.dx * hk.tip;
+          const ty = H - (hk.oy + hk.dy * hk.tip);
+          const rope = grappleLineRef.current;
+          if (rope) {
+            rope.setAttribute('x1', px);
+            rope.setAttribute('y1', py);
+            rope.setAttribute('x2', tx);
+            rope.setAttribute('y2', ty);
+          }
+          const head = grappleHookRef.current;
+          if (head) {
+            const deg = (Math.atan2(-hk.dy, hk.dx) * 180) / Math.PI;
+            head.setAttribute('transform', `translate(${tx} ${ty}) rotate(${deg})`);
+          }
+          hookSvg.dataset.phase = hk.phase;
+          hookSvg.style.display = '';
         } else {
-          gl.style.display = 'none';
-          if (hook) hook.style.display = 'none';
-          if (dot) dot.style.display = 'none';
+          hookSvg.style.display = 'none';
         }
       }
 
@@ -1039,20 +1184,44 @@ export default function GameWorld({
         }
       });
 
-      // Camera: smooth follow player vertically
+      // Camera: smooth follow player vertically. The bird uses a dead-zone
+      // instead: the view holds still while the bird circles in the middle band
+      // and scrolls (edge-scroll style) when the cursor pulls it toward an edge.
       const pd = pageDataRef.current;
       const charTop = pd.height - player.current.y - player.current.height;
       const viewportHeight = window.innerHeight;
-      const targetScroll = charTop - viewportHeight / 2;
-      const clamped = Math.max(0, Math.min(targetScroll, pd.height - viewportHeight));
-
-      // Frame-rate independent camera smoothing
-      const smoothing = 1 - Math.pow(1 - 0.15, frameDt / FIXED_STEP);
-      cameraY.current += (clamped - cameraY.current) * smoothing;
+      const maxScroll = Math.max(0, pd.height - viewportHeight);
+      if (movementTypeRef.current === 'bird') {
+        const excess = charTop + player.current.height / 2 - cameraY.current - viewportHeight / 2;
+        const band = viewportHeight * 0.2;
+        let move = 0;
+        if (excess > band) move = excess - band;
+        else if (excess < -band) move = excess + band;
+        const step = Math.max(-12, Math.min(12, move * 0.06)) * (frameDt / FIXED_STEP);
+        cameraY.current = Math.max(0, Math.min(cameraY.current + step, maxScroll));
+      } else {
+        const targetScroll = charTop - viewportHeight / 2;
+        const clamped = Math.max(0, Math.min(targetScroll, maxScroll));
+        // Frame-rate independent camera smoothing
+        const smoothing = 1 - Math.pow(1 - 0.15, frameDt / FIXED_STEP);
+        cameraY.current += (clamped - cameraY.current) * smoothing;
+      }
 
       const container = containerRef.current;
       if (container) {
         container.scrollTop = cameraY.current;
+      }
+
+      const marker = cursorMarkerRef.current;
+      if (marker) {
+        const inp = input.current;
+        if (movementTypeRef.current === 'bird' && inp.cursorClientX != null) {
+          marker.style.display = '';
+          marker.style.left = inp.cursorClientX + 'px';
+          marker.style.bottom = (pd.height - inp.cursorClientY - cameraY.current) + 'px';
+        } else {
+          marker.style.display = 'none';
+        }
       }
 
       frameId = requestAnimationFrame(loop);
@@ -1075,7 +1244,7 @@ export default function GameWorld({
   }, []);
 
   // Trail dots for certain movement types
-  const showTrail = movementType === 'spaceship' || movementType === 'flight' || movementType === 'bounce';
+  const showTrail = movementType === 'spaceship' || movementType === 'bird' || movementType === 'bounce';
   const trailDots = showTrail ? Array.from({ length: 20 }, (_, i) => i) : [];
 
   return (
@@ -1089,7 +1258,7 @@ export default function GameWorld({
       <div className="nav-hint" style={isTouch ? { bottom: 150 } : undefined}>{navHint}</div>
 
       {/* Touch controls */}
-      {isTouch && (
+      {isTouch && movementType !== 'bird' && movementType !== 'grapple' && (
         <>
           <div className="touch-dpad">
             <TouchButton label="Move up" className="touch-up" onPress={() => pressDirection('up')} onRelease={() => releaseDirection('up')}>▲</TouchButton>
@@ -1097,14 +1266,14 @@ export default function GameWorld({
             <TouchButton label="Move down" className="touch-down" onPress={() => pressDirection('down')} onRelease={() => releaseDirection('down')}>▼</TouchButton>
             <TouchButton label="Move right" className="touch-right" onPress={() => pressDirection('right')} onRelease={() => releaseDirection('right')}>▶</TouchButton>
           </div>
-          {(movementType === 'platformer' || movementType === 'flight') && (
+          {movementType === 'platformer' && (
             <TouchButton
-              label={movementType === 'platformer' ? 'Jump' : 'Boost'}
+              label="Jump"
               className="touch-action"
               onPress={pressAction}
               onRelease={releaseAction}
             >
-              {movementType === 'platformer' ? 'JUMP' : 'BOOST'}
+              JUMP
             </TouchButton>
           )}
         </>
@@ -1117,7 +1286,7 @@ export default function GameWorld({
         style={{ height: pageData.height }}
       >
         {/* Page content */}
-        <div className="page-content">{children}</div>
+        <div ref={contentRootRef} className="page-content">{children}</div>
 
         {/* Platforms */}
         {resolvedPlatforms.map((p, i) => (
@@ -1192,33 +1361,39 @@ export default function GameWorld({
           />
         ))}
 
-        {/* Grapple line */}
+        {/* Grappling hook: rope from the player to the flying/attached hook head */}
         <svg
-          ref={grappleLineRef}
-          className="absolute inset-0 w-full h-full pointer-events-none"
+          ref={grappleSvgRef}
+          className="grapple-svg absolute inset-0 w-full h-full pointer-events-none"
           style={{ display: 'none' }}
+          aria-hidden="true"
         >
           <line
+            ref={grappleLineRef}
             x1="0" y1="0" x2="0" y2="0"
-            stroke="rgba(180,120,255,0.9)"
-            strokeWidth="4"
-            strokeDasharray="8 4"
+            stroke="rgba(200,160,255,0.95)"
+            strokeWidth="2.5"
             strokeLinecap="round"
           />
-          {/* Hook endpoint */}
-          <circle
+          <g
             ref={grappleHookRef}
-            cx="0" cy="0" r="6"
             fill="none"
-            stroke="rgba(180,120,255,0.9)"
-            strokeWidth="2.5"
-          />
-          <circle
-            ref={grappleDotRef}
-            cx="0" cy="0" r="2"
-            fill="rgba(180,120,255,0.6)"
-          />
+            stroke="rgba(230,210,255,1)"
+            strokeWidth="3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M-12,0 L4,0 M4,0 Q-2,-10 -10,-9 M4,0 Q-2,10 -10,9" />
+            <circle cx="-12" cy="0" r="2.5" fill="rgba(230,210,255,1)" />
+          </g>
         </svg>
+
+        {/* Cursor marker (bird page) */}
+        <div
+          ref={cursorMarkerRef}
+          className="cursor-marker absolute pointer-events-none"
+          style={{ display: 'none', left: 0, bottom: 0 }}
+        />
 
         {/* Player */}
         <div
@@ -1226,8 +1401,16 @@ export default function GameWorld({
           id="character"
           className="absolute w-6 h-6 bg-white rounded-full"
           data-movement={movementType}
+          data-thrust="0"
           style={{ left: 0, bottom: 0 }}
-        />
+        >
+          {movementType === 'asteroids' && (
+            <svg className="ship-svg" viewBox="0 0 24 24" aria-hidden="true">
+              <polygon className="ship-flame" points="9.5,18 12,25 14.5,18" />
+              <polygon className="ship-hull" points="12,2 20,21 12,17 4,21" />
+            </svg>
+          )}
+        </div>
       </div>
     </div>
   );

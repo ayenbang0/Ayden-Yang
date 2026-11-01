@@ -633,6 +633,51 @@ function GalleryPage() {
   );
 }
 
+const CONTACT_EMAIL = 'hello@aydenyang.com';
+
+/** Opens the visitor's mail client with a pre-filled message to CONTACT_EMAIL. */
+function MessageForm() {
+  const [name, setName] = useState('');
+  const [from, setFrom] = useState('');
+  const [message, setMessage] = useState('');
+  const [sent, setSent] = useState(false);
+
+  const submit = (e) => {
+    e.preventDefault();
+    const subject = `Message from ${name.trim() || 'your website'}`;
+    const body = `${message.trim()}\n\n— ${name.trim()}${from.trim() ? ` (${from.trim()})` : ''}`;
+    window.location.href =
+      `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    setSent(true);
+  };
+
+  const field =
+    'w-full bg-transparent border border-white/15 rounded px-3 py-2 text-sm text-white placeholder-white/25 outline-none focus:border-white/50';
+
+  return (
+    <form className="card p-5 w-full" onSubmit={submit} data-no-game-click>
+      <div className="space-y-3">
+        <label className="block">
+          <span className="block text-[0.55rem] tracking-[0.12em] opacity-35 mb-1">NAME</span>
+          <input className={field} type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" autoComplete="name" />
+        </label>
+        <label className="block">
+          <span className="block text-[0.55rem] tracking-[0.12em] opacity-35 mb-1">YOUR EMAIL</span>
+          <input className={field} type="email" value={from} onChange={(e) => setFrom(e.target.value)} placeholder="you@example.com" autoComplete="email" />
+        </label>
+        <label className="block">
+          <span className="block text-[0.55rem] tracking-[0.12em] opacity-35 mb-1">MESSAGE</span>
+          <textarea className={`${field} resize-none h-[100px]`} required value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Your message..." />
+        </label>
+        <button type="submit" className="w-full border border-white/30 rounded py-2 text-[0.65rem] tracking-[0.2em] hover:bg-white/10">
+          SEND TO {CONTACT_EMAIL.toUpperCase()}
+        </button>
+        {sent && <p className="text-[0.55rem] opacity-40 text-center">Opening your email app… or write to {CONTACT_EMAIL}.</p>}
+      </div>
+    </form>
+  );
+}
+
 function ContactPage() {
   return (
     <>
@@ -653,7 +698,7 @@ function ContactPage() {
             </svg>
             <div>
               <p className="text-[0.55rem] tracking-[0.15em] opacity-35">EMAIL</p>
-              <p className="text-sm mt-0.5">aydenzyang@gmail.com</p>
+              <a href={`mailto:${CONTACT_EMAIL}`} className="text-sm mt-0.5 block underline decoration-white/20 hover:decoration-white/60">{CONTACT_EMAIL}</a>
             </div>
           </div>
           <div className="card p-4 flex items-center gap-4">
@@ -706,36 +751,15 @@ function ContactPage() {
 
       {/* Contact form */}
       <div className="absolute left-1/2 -translate-x-1/2" style={{ top: 880, width: 'min(400px, 84vw)' }}>
-        <p className="text-label text-[0.6rem] opacity-30 mb-4">SEND A MESSAGE</p>
-        <div className="card p-5 w-full">
-          <div className="space-y-3">
-            <div>
-              <p className="text-[0.55rem] tracking-[0.12em] opacity-35 mb-1">NAME</p>
-              <div className="photo-placeholder w-full h-[36px]">
-                <span className="text-[0.5rem] opacity-30">Your name</span>
-              </div>
-            </div>
-            <div>
-              <p className="text-[0.55rem] tracking-[0.12em] opacity-35 mb-1">EMAIL</p>
-              <div className="photo-placeholder w-full h-[36px]">
-                <span className="text-[0.5rem] opacity-30">your@email.com</span>
-              </div>
-            </div>
-            <div>
-              <p className="text-[0.55rem] tracking-[0.12em] opacity-35 mb-1">MESSAGE</p>
-              <div className="photo-placeholder w-full h-[100px]">
-                <span className="text-[0.5rem] opacity-30">Your message...</span>
-              </div>
-            </div>
-          </div>
-        </div>
+        <p className="text-label text-[0.6rem] opacity-30 mb-4">MESSAGE ME</p>
+        <MessageForm />
       </div>
 
       {/* Divider */}
-      <div className="absolute inset-x-0 divider" style={{ top: 1200 }}></div>
+      <div className="absolute inset-x-0 divider" style={{ top: 1320 }}></div>
 
       {/* Note */}
-      <div className="absolute left-1/2 -translate-x-1/2" style={{ top: 1260 }}>
+      <div className="absolute left-1/2 -translate-x-1/2" style={{ top: 1380 }}>
         <div className="text-center" style={{ width: 'min(400px, 84vw)' }}>
           <p className="text-xs opacity-40 leading-relaxed">
             For performance inquiries, collaborations, or just to say hello —
@@ -745,7 +769,7 @@ function ContactPage() {
       </div>
 
       {/* Contact card / QR */}
-      <div className="absolute left-1/2 -translate-x-1/2" style={{ top: 1400 }}>
+      <div className="absolute left-1/2 -translate-x-1/2" style={{ top: 1520 }}>
         <div className="photo-placeholder w-[240px] h-[160px]">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
             <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>

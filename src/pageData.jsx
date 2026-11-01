@@ -69,7 +69,7 @@ export const PAGE_DATA = {
   music: {
     id: 'music',
     label: 'MUSIC',
-    movementType: 'tank',
+    movementType: 'asteroids',
     height: 4200,
     spawn: { xPct: 50, y: 3902 },
     platforms: [
@@ -100,7 +100,7 @@ export const PAGE_DATA = {
   projects: {
     id: 'projects',
     label: 'PROJECTS',
-    movementType: 'flight',
+    movementType: 'bird',
     height: 3600,
     spawn: { xPct: 50, y: 3302 },
     platforms: [
