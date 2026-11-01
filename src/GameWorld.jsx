@@ -27,16 +27,13 @@ const SHIP_DRAG = 0.9965;
 const SHIP_MAX_SPEED = 9;
 const SHIP_BOUNCE = 0.45;
 
-// Bird: circle that chases the cursor, then orbits it
-const BIRD_MAX_SPEED = 16;
-const BIRD_STEER = 0.1;
-const BIRD_ORBIT_RADIUS = 72;
-const BIRD_ORBIT_SPEED = 3;
-const BIRD_MIN_DIST = 42;
+// Top-down RPG grid movement
+const RPG_CELL = 24;
+const RPG_STEP = 7; // frames per tile
 
 // Grappling hook
 const GRAPPLE_GRAVITY = 0.4;
-const GRAPPLE_HOOK_SPEED = 46;
+const GRAPPLE_HOOK_SPEED = 24;
 const GRAPPLE_PULL_SPEED = 20;
 const GRAPPLE_RANGE = 2400;
 const GRAPPLE_ROPE_LEN = 170;
@@ -293,77 +290,61 @@ function updateAsteroidsPhysics(player, platforms, input, worldWidth, worldHeigh
   moveAndCollide(player, platforms, worldWidth, worldHeight, SHIP_BOUNCE);
 }
 
-function updateBirdPhysics(player, platforms, input, worldWidth, worldHeight) {
-  player.orbitT = (player.orbitT || 0) + 0.035;
-  const hasCursor = input.cursorClientX != null;
-  let ux = 1;
-  let uy = 0;
+// Top-down RPG: tile-to-tile movement. Hold a direction to keep walking; solids and the world edge block.
+function rpgCellBlocked(x, y, platforms, worldWidth, worldHeight) {
+  const C = RPG_CELL;
+  if (x < 0 || y < 0 || x + C > worldWidth || y + C > worldHeight) return true;
+  const cell = { x, y, width: C, height: C };
+  for (let i = 0; i < platforms.length; i++) {
+    if (overlapsRect(cell, platforms[i])) return true;
+  }
+  return false;
+}
 
-  if (!hasCursor) {
-    // Idle hover until the cursor appears
-    player.vx *= 0.92;
-    player.vy = player.vy * 0.92 + Math.sin(player.orbitT) * 0.03;
-    player.prevCX = null;
-  } else {
-    const cx = input.mouseWorldX;
-    const cy = input.mouseWorldY;
-    let cvx = 0;
-    let cvy = 0;
-    if (player.prevCX != null) {
-      cvx = cx - player.prevCX;
-      cvy = cy - player.prevCY;
-      const m = Math.hypot(cvx, cvy);
-      if (m > BIRD_MAX_SPEED) { cvx = (cvx / m) * BIRD_MAX_SPEED; cvy = (cvy / m) * BIRD_MAX_SPEED; }
+function updateRpgPhysics(player, platforms, input, worldWidth, worldHeight) {
+  const C = RPG_CELL;
+  let r = player.rpg;
+  // (Re)initialise whenever something else moved the player: spawn, resize, debug teleport
+  if (!r || r.lastX !== player.x || r.lastY !== player.y) {
+    r = player.rpg = { x: player.x, y: player.y, fromX: player.x, fromY: player.y, t: 0, moving: false, dx: 0, dy: -1, lastX: 0, lastY: 0 };
+  }
+
+  if (r.moving && ++r.t >= RPG_STEP) {
+    r.moving = false;
+    r.fromX = r.x;
+    r.fromY = r.y;
+  }
+
+  if (!r.moving) {
+    let dx = 0;
+    let dy = 0;
+    if (input.up) dy = 1;
+    else if (input.down) dy = -1;
+    else if (input.left) dx = -1;
+    else if (input.right) dx = 1;
+    if (dx || dy) {
+      r.dx = dx;
+      r.dy = dy;
+      if (!rpgCellBlocked(r.x + dx * C, r.y + dy * C, platforms, worldWidth, worldHeight)) {
+        r.fromX = r.x;
+        r.fromY = r.y;
+        r.x += dx * C;
+        r.y += dy * C;
+        r.t = 0;
+        r.moving = true;
+      }
     }
-    player.prevCX = cx;
-    player.prevCY = cy;
-
-    let rx = player.x + player.width / 2 - cx;
-    let ry = player.y + player.height / 2 - cy;
-    let d = Math.hypot(rx, ry);
-    if (d < 1) { rx = 1; ry = 0; d = 1; }
-    ux = rx / d;
-    uy = ry / d;
-
-    const radius = BIRD_ORBIT_RADIUS + Math.sin(player.orbitT * 0.7) * 8;
-    const radial = Math.max(-BIRD_MAX_SPEED, Math.min(BIRD_MAX_SPEED, (radius - d) * 0.12));
-    // Tangent (counter-clockwise) keeps it circling when the cursor is still
-    const dvx = cvx * 0.9 - uy * BIRD_ORBIT_SPEED + ux * radial;
-    const dvy = cvy * 0.9 + ux * BIRD_ORBIT_SPEED + uy * radial;
-    player.vx += (dvx - player.vx) * BIRD_STEER;
-    player.vy += (dvy - player.vy) * BIRD_STEER;
   }
 
-  const speed = Math.hypot(player.vx, player.vy);
-  if (speed > BIRD_MAX_SPEED) {
-    player.vx = (player.vx / speed) * BIRD_MAX_SPEED;
-    player.vy = (player.vy / speed) * BIRD_MAX_SPEED;
-  }
-
-  // The bird flies freely (platforms don't block it); only the world edges do.
-  player.x += player.vx;
-  player.y += player.vy;
-  if (player.x < 0) { player.x = 0; player.vx = Math.abs(player.vx) * 0.3; }
-  else if (player.x > worldWidth - player.width) { player.x = worldWidth - player.width; player.vx = -Math.abs(player.vx) * 0.3; }
-  if (player.y < 0) { player.y = 0; player.vy = Math.abs(player.vy) * 0.3; }
-  else if (player.y > worldHeight - player.height) { player.y = worldHeight - player.height; player.vy = -Math.abs(player.vy) * 0.3; }
+  const k = r.moving ? r.t / RPG_STEP : 1;
+  player.x = r.fromX + (r.x - r.fromX) * k;
+  player.y = r.fromY + (r.y - r.fromY) * k;
+  player.vx = 0;
+  player.vy = 0;
   player.onGround = false;
-
-  if (hasCursor) {
-    // Never touch the cursor: hard minimum distance
-    const rx = player.x + player.width / 2 - input.mouseWorldX;
-    const ry = player.y + player.height / 2 - input.mouseWorldY;
-    const d = Math.hypot(rx, ry);
-    if (d < BIRD_MIN_DIST) {
-      const nx = d > 0.5 ? rx / d : ux;
-      const ny = d > 0.5 ? ry / d : uy;
-      player.x = input.mouseWorldX + nx * BIRD_MIN_DIST - player.width / 2;
-      player.y = input.mouseWorldY + ny * BIRD_MIN_DIST - player.height / 2;
-      player.x = Math.max(0, Math.min(worldWidth - player.width, player.x));
-      player.y = Math.max(0, Math.min(worldHeight - player.height, player.y));
-    }
-  }
-  if (Math.hypot(player.vx, player.vy) > 0.6) player.angle = Math.atan2(player.vy, player.vx);
+  player.angle = Math.atan2(r.dy, r.dx);
+  r.lastX = player.x;
+  r.lastY = player.y;
 }
 
 /**
@@ -456,12 +437,12 @@ function updateGrapplePhysics(player, platforms, input, worldWidth, worldHeight)
       const ny = dy / dist;
       const range = Math.min(dist, GRAPPLE_RANGE);
       const hit = grappleRaycast(player, platforms, cx + nx * range, cy + ny * range, range);
+      // Latch onto the first solid in the way, otherwise anywhere the player clicked
       const reach = hit ? Math.hypot(hit.x - cx, hit.y - cy) : range;
       input.hook = {
         phase: 'flying',
         ox: cx, oy: cy, dx: nx, dy: ny,
         tip: 0, reach,
-        hit: !!hit,
         ax: cx + nx * reach,
         ay: cy + ny * reach,
         len: 0,
@@ -474,10 +455,7 @@ function updateGrapplePhysics(player, platforms, input, worldWidth, worldHeight)
 
   if (hook && hook.phase === 'flying') {
     hook.tip = Math.min(hook.reach, hook.tip + GRAPPLE_HOOK_SPEED);
-    if (hook.tip >= hook.reach) {
-      if (hook.hit) hook.phase = 'reeling';
-      else { input.hook = null; } // nothing to catch: the hook falls away
-    }
+    if (hook.tip >= hook.reach) hook.phase = 'reeling';
   }
 
   if (input.hook && input.hook.phase === 'reeling') {
@@ -535,6 +513,23 @@ function updateGrapplePhysics(player, platforms, input, worldWidth, worldHeight)
   moveAndCollide(player, platforms, worldWidth, worldHeight, 0);
 }
 
+const SNAKE_DIRS = [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }];
+
+// True when the head cannot enter cell (nx, ny): world edge, platform, or its own body.
+// The tail cell is vacated on the step, so it is not an obstacle.
+function snakeCellBlocked(s, nx, ny, platforms, worldWidth, worldHeight) {
+  const C = SNAKE_CELL;
+  if (nx < 0 || ny < 0 || nx + C > worldWidth || ny + C > worldHeight) return true;
+  const cell = { x: nx, y: ny, width: C, height: C };
+  for (let i = 0; i < platforms.length; i++) {
+    if (overlapsRect(cell, platforms[i])) return true;
+  }
+  for (let i = s.body.length >= SNAKE_LEN - 1 ? 1 : 0; i < s.body.length; i++) {
+    if (s.body[i].x === nx + C / 2 && s.body[i].y === ny + C / 2) return true;
+  }
+  return false;
+}
+
 function updateSnakePhysics(player, platforms, input, worldWidth, worldHeight, portals) {
   const C = SNAKE_CELL;
   let s = player.snake;
@@ -568,17 +563,11 @@ function updateSnakePhysics(player, platforms, input, worldWidth, worldHeight, p
     const ny = s.y + s.dir.y * C;
     const cell = { x: nx, y: ny, width: C, height: C };
 
-    let crash = nx < 0 || ny < 0 || nx + C > worldWidth || ny + C > worldHeight;
-    for (let i = 0; !crash && i < platforms.length; i++) {
-      if (overlapsRect(cell, platforms[i])) crash = true;
-    }
-    // The tail cell is vacated this step, so it is not an obstacle
-    for (let i = s.body.length >= SNAKE_LEN - 1 ? 1 : 0; !crash && i < s.body.length; i++) {
-      if (s.body[i].x === nx + C / 2 && s.body[i].y === ny + C / 2) crash = true;
-    }
-
-    if (crash) {
+    if (snakeCellBlocked(s, nx, ny, platforms, worldWidth, worldHeight)) {
       s.state = 'crashed';
+      // Fully walled in on every side: no way out
+      s.trapped = SNAKE_DIRS.every((d) =>
+        snakeCellBlocked(s, s.x + d.x * C, s.y + d.y * C, platforms, worldWidth, worldHeight));
     } else {
       const wasInPortal = overlapsAnyPortal({ x: s.x, y: s.y, width: C, height: C }, portals);
       s.body.push({ x: s.x + C / 2, y: s.y + C / 2 });
@@ -604,7 +593,7 @@ function updatePhysics(player, platforms, input, worldWidth, worldHeight, moveme
   switch (movementType) {
     case 'spaceship': return updateSpaceshipPhysics(player, platforms, input, worldWidth, worldHeight);
     case 'asteroids': return updateAsteroidsPhysics(player, platforms, input, worldWidth, worldHeight);
-    case 'bird': return updateBirdPhysics(player, platforms, input, worldWidth, worldHeight);
+    case 'rpg': return updateRpgPhysics(player, platforms, input, worldWidth, worldHeight);
     case 'grapple': return updateGrapplePhysics(player, platforms, input, worldWidth, worldHeight);
     case 'snake': return updateSnakePhysics(player, platforms, input, worldWidth, worldHeight, portals);
     default: return updatePlatformerPhysics(player, platforms, input, worldWidth, worldHeight);
@@ -616,7 +605,7 @@ const NAV_HINTS = {
   platformer: 'WASD to move · Hold in portals to navigate',
   spaceship: 'WASD to thrust · Hold in portals to navigate',
   asteroids: 'W / ↑ thrust · S / ↓ brake · A D / ← → rotate · Hold in portals to navigate',
-  bird: 'Move your cursor — the bird follows and circles it · Hold in portals to navigate',
+  rpg: 'WASD / arrows to walk, one tile at a time · solid blocks stop you · Hold in portals to navigate',
   grapple: 'Click anywhere to throw the hook · you reel in, then swing on the rope · A D to pump the swing · S to let go · Hold in portals to navigate',
   snake: 'WASD / arrows to steer the snake · it stops when it hits a wall, platform or itself — press a direction to move again · it stops in portals, wait to travel',
 };
@@ -625,7 +614,7 @@ const TOUCH_HINTS = {
   platformer: 'D-pad to move · JUMP to jump · Hold in portals',
   spaceship: 'D-pad to thrust · Hold in portals',
   asteroids: 'Left/right rotate · Up thrust · Down brake · Hold in portals',
-  bird: 'Drag a finger — the bird follows and circles it · Hold in portals',
+  rpg: 'D-pad to walk · Hold in portals',
   grapple: 'Tap anywhere to throw the hook · Hold in portals',
   snake: 'D-pad steers the snake · it stops when it crashes — press a direction to move again · wait in portals',
 };
@@ -699,6 +688,8 @@ export default function GameWorld({
   pageData,
   children,
   onNavigate,
+  onRestart,
+  respawnKey,
   transitioning,
 }) {
   const worldRef = useRef(null);
@@ -709,7 +700,6 @@ export default function GameWorld({
   const grappleSvgRef = useRef(null);
   const grappleLineRef = useRef(null);
   const grappleHookRef = useRef(null);
-  const cursorMarkerRef = useRef(null);
   const contentRootRef = useRef(null);
   const pendingSpawnRef = useRef(false);
   const trailDotsRef = useRef([]);
@@ -741,13 +731,12 @@ export default function GameWorld({
     thrustUp: false, thrustDown: false, thrustLeft: false, thrustRight: false,
     boost: false,
     hook: null, hookFire: null,
-    mouseWorldX: 0, mouseWorldY: 0,
-    cursorClientX: null, cursorClientY: null,
   });
 
   const cameraY = useRef(0);
   const portalHolds = useRef(new Map());
   const prevPageIdRef = useRef(null);
+  const prevRespawnKeyRef = useRef(respawnKey);
   const prevWorldWidthRef = useRef(worldWidth);
 
   const baseplatforms = useMemo(
@@ -836,6 +825,8 @@ export default function GameWorld({
   transitioningRef.current = transitioning;
   const onNavigateRef = useRef(onNavigate);
   onNavigateRef.current = onNavigate;
+  const onRestartRef = useRef(onRestart);
+  onRestartRef.current = onRestart;
   const pageDataRef = useRef(pageData);
   pageDataRef.current = pageData;
   const movementTypeRef = useRef(movementType);
@@ -866,7 +857,10 @@ export default function GameWorld({
 
   // Reset player on page change; preserve the player's position on resize
   useLayoutEffect(() => {
-    const pageChanged = prevPageIdRef.current !== pageData.id;
+    // A respawn (snake trapped) replays the page-entry reset without changing page
+    const respawned = prevRespawnKeyRef.current !== respawnKey;
+    prevRespawnKeyRef.current = respawnKey;
+    const pageChanged = prevPageIdRef.current !== pageData.id || respawned;
     const prevWidth = prevWorldWidthRef.current;
     const widthChanged = prevWidth !== worldWidth;
 
@@ -878,18 +872,13 @@ export default function GameWorld({
       player.current.jumpsLeft = MAX_JUMPS;
       player.current.angle = Math.PI / 2;
       player.current.thrusting = false;
-      player.current.prevCX = null;
       cameraY.current = 0;
       portalHolds.current.clear();
       trailRef.current = [];
       trailDotsRef.current = [];
-      const cursorX = input.current.cursorClientX;
-      const cursorY = input.current.cursorClientY;
       resetInputState(input.current);
       input.current.hook = null;
       input.current.hookFire = null;
-      input.current.cursorClientX = cursorX;
-      input.current.cursorClientY = cursorY;
       setPageIndicator(pageData.label);
       setNavHint((isTouch ? TOUCH_HINTS : NAV_HINTS)[pageData.movementType] || NAV_HINTS.platformer);
     }
@@ -941,7 +930,7 @@ export default function GameWorld({
 
     prevPageIdRef.current = pageData.id;
     prevWorldWidthRef.current = worldWidth;
-  }, [pageData, worldWidth, isTouch, layout, needsSolve]);
+  }, [pageData, worldWidth, isTouch, layout, needsSolve, respawnKey]);
 
   // Track coarse-pointer devices so touch controls only appear on touch screens
   useEffect(() => {
@@ -1037,32 +1026,6 @@ export default function GameWorld({
     };
   }, []);
 
-  // Pointer tracking — convert screen coords to world coords
-  const updateMouseWorld = useCallback((clientX, clientY) => {
-    const container = containerRef.current;
-    if (!container) return;
-    const rect = container.getBoundingClientRect();
-    input.current.cursorClientX = clientX;
-    input.current.cursorClientY = clientY;
-    input.current.mouseWorldX = clientX - rect.left;
-    input.current.mouseWorldY = pageDataRef.current.height - (clientY - rect.top) - container.scrollTop;
-  }, []);
-
-  useEffect(() => {
-    const handleMouseMove = (e) => updateMouseWorld(e.clientX, e.clientY);
-    const handleTouch = (e) => {
-      const t = e.touches[0];
-      if (t) updateMouseWorld(t.clientX, t.clientY);
-    };
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('touchstart', handleTouch, { passive: true });
-    window.addEventListener('touchmove', handleTouch, { passive: true });
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('touchstart', handleTouch);
-      window.removeEventListener('touchmove', handleTouch);
-    };
-  }, [updateMouseWorld]);
 
   // Click handling for grapple
   useEffect(() => {
@@ -1097,11 +1060,6 @@ export default function GameWorld({
       const mt = movementTypeRef.current;
       const pd = pageDataRef.current;
 
-      // The camera moves under a stationary pointer, so re-derive its world position
-      if (mt === 'bird' && input.current.cursorClientX != null) {
-        input.current.mouseWorldX = input.current.cursorClientX;
-        input.current.mouseWorldY = pd.height - input.current.cursorClientY - cameraY.current;
-      }
 
       updatePhysics(
         player.current,
@@ -1113,11 +1071,19 @@ export default function GameWorld({
         portalsRef.current
       );
 
-      // Update trail for spaceship and bird (the snake keeps its own body)
-      if (mt === 'spaceship' || mt === 'bird') {
+      // Update trail for the spaceship (the snake keeps its own body)
+      if (mt === 'spaceship') {
         const t = trailRef.current;
         t.push({ x: player.current.x + player.current.width / 2, y: player.current.y + player.current.height / 2 });
         if (t.length > 20) t.shift();
+      }
+
+      // Snake walled in on all sides: send the player back to the top of the page
+      if (mt === 'snake' && player.current.snake && player.current.snake.trapped) {
+        player.current.snake.trapped = false;
+        onRestartRef.current();
+        transitioningRef.current = true;
+        return;
       }
 
       // Check portals
@@ -1225,45 +1191,22 @@ export default function GameWorld({
         }
       });
 
-      // Camera: smooth follow player vertically. The bird uses a dead-zone
-      // instead: the view holds still while the bird circles in the middle band
-      // and scrolls (edge-scroll style) when the cursor pulls it toward an edge.
+      // Camera: smooth follow player vertically
       const pd = pageDataRef.current;
       const charTop = pd.height - player.current.y - player.current.height;
       const viewportHeight = window.innerHeight;
       const maxScroll = Math.max(0, pd.height - viewportHeight);
-      if (movementTypeRef.current === 'bird') {
-        const excess = charTop + player.current.height / 2 - cameraY.current - viewportHeight / 2;
-        const band = viewportHeight * 0.2;
-        let move = 0;
-        if (excess > band) move = excess - band;
-        else if (excess < -band) move = excess + band;
-        const step = Math.max(-12, Math.min(12, move * 0.06)) * (frameDt / FIXED_STEP);
-        cameraY.current = Math.max(0, Math.min(cameraY.current + step, maxScroll));
-      } else {
-        const targetScroll = charTop - viewportHeight / 2;
-        const clamped = Math.max(0, Math.min(targetScroll, maxScroll));
-        // Frame-rate independent camera smoothing
-        const smoothing = 1 - Math.pow(1 - 0.15, frameDt / FIXED_STEP);
-        cameraY.current += (clamped - cameraY.current) * smoothing;
-      }
+      const targetScroll = charTop - viewportHeight / 2;
+      const clamped = Math.max(0, Math.min(targetScroll, maxScroll));
+      // Frame-rate independent camera smoothing
+      const smoothing = 1 - Math.pow(1 - 0.15, frameDt / FIXED_STEP);
+      cameraY.current += (clamped - cameraY.current) * smoothing;
 
       const container = containerRef.current;
       if (container) {
         container.scrollTop = cameraY.current;
       }
 
-      const marker = cursorMarkerRef.current;
-      if (marker) {
-        const inp = input.current;
-        if (movementTypeRef.current === 'bird' && inp.cursorClientX != null) {
-          marker.style.display = '';
-          marker.style.left = inp.cursorClientX + 'px';
-          marker.style.bottom = (pd.height - inp.cursorClientY - cameraY.current) + 'px';
-        } else {
-          marker.style.display = 'none';
-        }
-      }
 
       frameId = requestAnimationFrame(loop);
     };
@@ -1285,7 +1228,7 @@ export default function GameWorld({
   }, []);
 
   // Trail dots for certain movement types
-  const showTrail = movementType === 'spaceship' || movementType === 'bird' || movementType === 'snake';
+  const showTrail = movementType === 'spaceship' || movementType === 'snake';
   const trailDots = showTrail ? Array.from({ length: 20 }, (_, i) => i) : [];
 
   return (
@@ -1299,7 +1242,7 @@ export default function GameWorld({
       <div className="nav-hint" style={isTouch ? { bottom: 150 } : undefined}>{navHint}</div>
 
       {/* Touch controls */}
-      {isTouch && movementType !== 'bird' && movementType !== 'grapple' && (
+      {isTouch && movementType !== 'grapple' && (
         <>
           <div className="touch-dpad">
             <TouchButton label="Move up" className="touch-up" onPress={() => pressDirection('up')} onRelease={() => releaseDirection('up')}>▲</TouchButton>
@@ -1429,12 +1372,6 @@ export default function GameWorld({
           </g>
         </svg>
 
-        {/* Cursor marker (bird page) */}
-        <div
-          ref={cursorMarkerRef}
-          className="cursor-marker absolute pointer-events-none"
-          style={{ display: 'none', left: 0, bottom: 0 }}
-        />
 
         {/* Player */}
         <div

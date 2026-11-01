@@ -100,7 +100,7 @@ export const PAGE_DATA = {
   projects: {
     id: 'projects',
     label: 'PROJECTS',
-    movementType: 'bird',
+    movementType: 'rpg',
     height: 3600,
     spawn: { xPct: 50, y: 3302 },
     platforms: [

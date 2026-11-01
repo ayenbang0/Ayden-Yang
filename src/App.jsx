@@ -7,6 +7,8 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState('home');
   const [transitioning, setTransitioning] = useState(false);
   const pendingTarget = useRef(null);
+  const pendingRestart = useRef(false);
+  const [respawnKey, setRespawnKey] = useState(0);
 
   const handleNavigate = useCallback((target) => {
     if (target === currentPage || transitioning) return;
@@ -14,11 +16,21 @@ export default function App() {
     pendingTarget.current = target;
     setTransitioning(true);
   }, [currentPage, transitioning]);
+  // Same page, back to the spawn point (used when the snake is trapped)
+  const handleRestart = useCallback(() => {
+    if (transitioning) return;
+    pendingTarget.current = null;
+    pendingRestart.current = true;
+    setTransitioning(true);
+  }, [transitioning]);
 
   const handleMidTransition = useCallback(() => {
     if (pendingTarget.current) {
       setCurrentPage(pendingTarget.current);
+    } else if (pendingRestart.current) {
+      setRespawnKey((k) => k + 1);
     }
+    pendingRestart.current = false;
   }, []);
 
   const handleEndTransition = useCallback(() => {
@@ -48,6 +60,8 @@ export default function App() {
       <GameWorld
         pageData={pageData}
         onNavigate={handleNavigate}
+        onRestart={handleRestart}
+        respawnKey={respawnKey}
         transitioning={transitioning}
       >
         <PageContent page={currentPage} />
